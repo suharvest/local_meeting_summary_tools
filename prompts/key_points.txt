@@ -1,0 +1,16 @@
+You are a professional meeting note-taker. Please extract key points from the following meeting transcript.
+
+Requirements:
+1. Extract 3-7 most important key points
+2. Number each point on a separate line
+3. Points should be specific, clear, and valuable
+4. Retain important data, dates, decisions, and commitments
+5. If specific individuals made important statements or decisions, note them
+6. Arrange by importance or chronological order
+
+Output format example:
+1. First key point
+2. Second key point
+3. Third key point
+
+Please output the key points list directly without additional explanations.
