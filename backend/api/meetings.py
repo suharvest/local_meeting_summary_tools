@@ -176,9 +176,9 @@ async def stream_meeting_minutes(
 
             # Initialize services with language
             language = meeting.get("language", "en")
-            transcript_service = TranscriptService(db)
+            transcript_service = TranscriptService(db, language=language)
             prompt_service = PromptService(language=language)
-            output_service = OutputService()
+            output_service = OutputService(language=language)
 
             # Get transcripts with extended time range (add 60 seconds buffer)
             extended_end_time = meeting["end_time"] + 60000  # Add 60 seconds
@@ -201,7 +201,12 @@ async def stream_meeting_minutes(
                 )
 
             if not transcripts:
-                yield f"event: error\ndata: {json.dumps({'error': '无转录记录，请确保设备正在上传数据', 'code': 400})}\n\n"
+                error_messages = {
+                    "en": "No transcript records found. Please ensure the device is uploading data.",
+                    "zh": "无转录记录，请确保设备正在上传数据"
+                }
+                error_msg = error_messages.get(language, error_messages["en"])
+                yield f"event: error\ndata: {json.dumps({'error': error_msg, 'code': 400})}\n\n"
                 return
 
             print(f"[INFO] Found {len(transcripts)} transcripts")

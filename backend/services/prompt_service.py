@@ -57,11 +57,16 @@ class PromptService:
         Raises:
             FileNotFoundError: If prompt file doesn't exist
         """
-        if not force_reload and filename in self._cache:
-            return self._cache[filename]
+        cache_key = f"{self.language}:{filename}"
 
-        # Load from root prompts directory
-        prompt_path = self.prompts_dir / filename
+        if not force_reload and cache_key in self._cache:
+            return self._cache[cache_key]
+
+        # Try language-specific directory first (e.g., prompts/en/meeting_summary.txt)
+        lang_specific_path = self.prompts_dir / self.language / filename
+
+        # Fall back to root prompts directory if language-specific doesn't exist
+        prompt_path = lang_specific_path if lang_specific_path.exists() else self.prompts_dir / filename
 
         if not prompt_path.exists():
             raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
@@ -69,7 +74,7 @@ class PromptService:
         with open(prompt_path, "r", encoding="utf-8") as f:
             content = f.read().strip()
 
-        self._cache[filename] = content
+        self._cache[cache_key] = content
         return content
 
     def get_meeting_summary_prompt(self) -> str:

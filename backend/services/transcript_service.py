@@ -8,8 +8,32 @@ from ..database import Database
 class TranscriptService:
     """Service for transcript record operations."""
 
-    def __init__(self, db: Database):
+    # Language-specific translations
+    TRANSLATIONS = {
+        "en": {
+            "no_transcripts": "No transcript records",
+            "unknown_speaker": "Unknown"
+        },
+        "zh": {
+            "no_transcripts": "无转录记录",
+            "unknown_speaker": "未知"
+        }
+    }
+
+    def __init__(self, db: Database, language: str = "en"):
         self.db = db
+        self.language = language if language in self.TRANSLATIONS else "en"
+
+    def _t(self, key: str) -> str:
+        """Get translation for a key.
+
+        Args:
+            key: Translation key
+
+        Returns:
+            Translated string
+        """
+        return self.TRANSLATIONS.get(self.language, self.TRANSLATIONS["en"]).get(key, key)
 
     async def get_transcripts(
         self,
@@ -53,14 +77,14 @@ class TranscriptService:
             Formatted transcript string for LLM input
         """
         if not transcripts:
-            return "无转录记录"
+            return self._t("no_transcripts")
 
         formatted_lines = []
         prev_speaker = None
         merged_text = []
 
         for record in transcripts:
-            speaker = record.get("speaker_name", "未知")
+            speaker = record.get("speaker_name", self._t("unknown_speaker"))
             text = record.get("text", "").strip()
             timestamp = record.get("device_time", 0)
 
@@ -94,12 +118,12 @@ class TranscriptService:
             Formatted transcript string with timestamps
         """
         if not transcripts:
-            return "无转录记录"
+            return self._t("no_transcripts")
 
         formatted_lines = []
 
         for record in transcripts:
-            speaker = record.get("speaker_name", "未知")
+            speaker = record.get("speaker_name", self._t("unknown_speaker"))
             text = record.get("text", "").strip()
             timestamp = record.get("device_time", 0)
 
