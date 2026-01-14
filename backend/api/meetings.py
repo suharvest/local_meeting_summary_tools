@@ -1,13 +1,16 @@
 """Meeting management API endpoints."""
 import asyncio
 import json
+import logging
 import time
 import uuid
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from ..database import Database, get_db
 from ..llm.factory import LLMFactory, get_llm_factory
@@ -15,10 +18,28 @@ from ..services.transcript_service import TranscriptService
 from ..services.prompt_service import PromptService, SUPPORTED_LANGUAGES
 from ..services.output_service import OutputService
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
+limiter = Limiter(key_func=get_remote_address)
 
 # In-memory storage for active meetings
 active_meetings: Dict[str, Dict[str, Any]] = {}
+
+# Meeting cleanup configuration
+MEETING_TTL_MS = 3600000  # 1 hour TTL for completed meetings
+
+
+def cleanup_old_meetings():
+    """Clean up completed meetings older than TTL to prevent memory leaks."""
+    now = int(time.time() * 1000)
+    to_remove = [
+        mid for mid, m in active_meetings.items()
+        if m.get("status") == "completed" and now - m.get("end_time", 0) > MEETING_TTL_MS
+    ]
+    for mid in to_remove:
+        del active_meetings[mid]
+    if to_remove:
+        logger.info(f"Cleaned up {len(to_remove)} old meetings")
 
 
 class StartMeetingRequest(BaseModel):
@@ -35,8 +56,10 @@ class EndMeetingRequest(BaseModel):
 
 
 @router.post("/start")
+@limiter.limit("30/minute")
 async def start_meeting(
-    request: StartMeetingRequest,
+    request: Request,
+    body: StartMeetingRequest,
     db: Database = Depends(get_db)
 ):
     """Start a new meeting session.
@@ -44,32 +67,40 @@ async def start_meeting(
     Creates a meeting record with start time and device information.
 
     Args:
-        request: Meeting start parameters
+        body: Meeting start parameters
 
     Returns:
         Meeting information including meeting_id
     """
+    # Clean up old meetings periodically
+    cleanup_old_meetings()
+
     # Generate unique meeting ID
     meeting_id = f"mtg_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     start_time = int(time.time() * 1000)
 
-    # Get device information
-    device = await db.fetchone(
-        "SELECT name FROM devices WHERE mac_address = %s",
-        (request.mac_address,)
-    )
-    device_name = device["name"] if device and device["name"] else request.mac_address
+    # Get device information with error handling
+    try:
+        device = await db.fetchone(
+            "SELECT name FROM devices WHERE mac_address = %s",
+            (body.mac_address,)
+        )
+        device_name = device["name"] if device and device["name"] else body.mac_address
+    except Exception as e:
+        logger.error(f"Database error while fetching device: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable")
 
     meeting = {
         "meeting_id": meeting_id,
-        "mac_address": request.mac_address,
+        "mac_address": body.mac_address,
         "device_name": device_name,
-        "title": request.title,
+        "title": body.title,
         "start_time": start_time,
         "status": "in_progress"
     }
 
     active_meetings[meeting_id] = meeting
+    logger.info(f"Meeting started: {meeting_id} for device {body.mac_address}")
 
     return {
         "code": 200,
@@ -78,8 +109,10 @@ async def start_meeting(
 
 
 @router.post("/end")
+@limiter.limit("30/minute")
 async def end_meeting(
-    request: EndMeetingRequest,
+    request: Request,
+    body: EndMeetingRequest,
     db: Database = Depends(get_db)
 ):
     """End an active meeting session.
@@ -87,48 +120,55 @@ async def end_meeting(
     Records end time and prepares for meeting minutes generation.
 
     Args:
-        request: Meeting end parameters
+        body: Meeting end parameters
 
     Returns:
         Meeting information with stream URL for SSE
     """
-    if request.meeting_id not in active_meetings:
+    if body.meeting_id not in active_meetings:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    meeting = active_meetings[request.meeting_id]
+    meeting = active_meetings[body.meeting_id]
     end_time = int(time.time() * 1000)
 
-    # Count transcript records
-    count_result = await db.fetchone(
-        """
-        SELECT COUNT(*) as count FROM recordings
-        WHERE mac_address = %s
-          AND device_time >= %s
-          AND device_time <= %s
-        """,
-        (meeting["mac_address"], meeting["start_time"], end_time)
-    )
+    # Count transcript records with error handling
+    try:
+        count_result = await db.fetchone(
+            """
+            SELECT COUNT(*) as count FROM recordings
+            WHERE mac_address = %s
+              AND device_time >= %s
+              AND device_time <= %s
+            """,
+            (meeting["mac_address"], meeting["start_time"], end_time)
+        )
+    except Exception as e:
+        logger.error(f"Database error while counting transcripts: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable")
 
     meeting.update({
         "end_time": end_time,
         "duration_seconds": (end_time - meeting["start_time"]) // 1000,
-        "transcript_count": count_result["count"],
+        "transcript_count": count_result["count"] if count_result else 0,
         "status": "generating",
-        "llm_provider": request.llm_provider,
-        "language": request.language or "en"
+        "llm_provider": body.llm_provider,
+        "language": body.language or "en"
     })
+
+    logger.info(f"Meeting ended: {body.meeting_id}, transcripts: {meeting['transcript_count']}")
 
     return {
         "code": 200,
         "data": {
             **meeting,
-            "stream_url": f"/api/meetings/{request.meeting_id}/stream"
+            "stream_url": f"/api/meetings/{body.meeting_id}/stream"
         }
     }
 
 
 @router.get("/{meeting_id}")
-async def get_meeting(meeting_id: str):
+@limiter.limit("60/minute")
+async def get_meeting(request: Request, meeting_id: str):
     """Get meeting information by ID.
 
     Args:
@@ -147,7 +187,9 @@ async def get_meeting(meeting_id: str):
 
 
 @router.get("/{meeting_id}/stream")
+@limiter.limit("10/minute")
 async def stream_meeting_minutes(
+    request: Request,
     meeting_id: str,
     db: Database = Depends(get_db),
     llm_factory: LLMFactory = Depends(get_llm_factory)
@@ -191,7 +233,7 @@ async def stream_meeting_minutes(
 
             # If no transcripts in meeting time range, try to get recent transcripts
             if not transcripts:
-                print(f"[INFO] No transcripts in meeting range, fetching recent data")
+                logger.info("No transcripts in meeting range, fetching recent data")
                 # Get transcripts from last 5 minutes as fallback
                 fallback_start = meeting["end_time"] - 300000  # 5 minutes before end
                 transcripts = await transcript_service.get_transcripts(
@@ -209,7 +251,7 @@ async def stream_meeting_minutes(
                 yield f"event: error\ndata: {json.dumps({'error': error_msg, 'code': 400})}\n\n"
                 return
 
-            print(f"[INFO] Found {len(transcripts)} transcripts")
+            logger.info(f"Found {len(transcripts)} transcripts for meeting {meeting_id}")
 
             # Send transcripts event
             yield f"event: transcripts\ndata: {json.dumps({'count': len(transcripts)})}\n\n"
@@ -285,7 +327,8 @@ async def stream_meeting_minutes(
             yield f"event: complete\ndata: {json.dumps({'meeting_id': meeting_id, 'file_path': output_path, 'status': 'completed'})}\n\n"
 
         except Exception as e:
-            yield f"event: error\ndata: {json.dumps({'error': str(e), 'code': 500})}\n\n"
+            logger.error(f"Error generating meeting minutes for {meeting_id}: {e}", exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'error': 'Internal server error', 'code': 500})}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -300,12 +343,16 @@ async def stream_meeting_minutes(
 
 
 @router.get("")
-async def list_meetings():
+@limiter.limit("60/minute")
+async def list_meetings(request: Request):
     """List all active meetings.
 
     Returns:
         List of active meeting information
     """
+    # Clean up old meetings before listing
+    cleanup_old_meetings()
+
     meetings = list(active_meetings.values())
     return {
         "code": 200,
@@ -314,7 +361,8 @@ async def list_meetings():
 
 
 @router.get("/config/languages")
-async def get_supported_languages():
+@limiter.limit("60/minute")
+async def get_supported_languages(request: Request):
     """Get list of supported languages for meeting minutes.
 
     Returns:

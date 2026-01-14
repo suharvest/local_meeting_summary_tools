@@ -1,14 +1,20 @@
 """Device management API endpoints."""
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import List, Optional
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from ..database import Database, get_db
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/devices", tags=["devices"])
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.get("")
-async def list_devices(db: Database = Depends(get_db)):
+@limiter.limit("60/minute")
+async def list_devices(request: Request, db: Database = Depends(get_db)):
     """Get list of all devices with recording counts.
 
     Returns:
@@ -27,7 +33,11 @@ async def list_devices(db: Database = Depends(get_db)):
         GROUP BY d.mac_address, d.name, d.ip_address, d.version
         ORDER BY recording_count DESC
     """
-    devices = await db.fetchall(query)
+    try:
+        devices = await db.fetchall(query)
+    except Exception as e:
+        logger.error(f"Database error while listing devices: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable")
 
     return {
         "code": 200,
@@ -36,7 +46,8 @@ async def list_devices(db: Database = Depends(get_db)):
 
 
 @router.get("/{mac_address}")
-async def get_device(mac_address: str, db: Database = Depends(get_db)):
+@limiter.limit("60/minute")
+async def get_device(request: Request, mac_address: str, db: Database = Depends(get_db)):
     """Get detailed information about a specific device.
 
     Args:
@@ -45,35 +56,41 @@ async def get_device(mac_address: str, db: Database = Depends(get_db)):
     Returns:
         Device details with recent recording statistics
     """
-    # Get device info
-    device_query = """
-        SELECT
-            d.mac_address,
-            d.name,
-            IFNULL(NULLIF(d.name, ''), d.mac_address) as display_name,
-            d.ip_address,
-            d.version,
-            d.created_at,
-            d.updated_at
-        FROM devices d
-        WHERE d.mac_address = %s
-    """
-    device = await db.fetchone(device_query, (mac_address,))
+    try:
+        # Get device info
+        device_query = """
+            SELECT
+                d.mac_address,
+                d.name,
+                IFNULL(NULLIF(d.name, ''), d.mac_address) as display_name,
+                d.ip_address,
+                d.version,
+                d.created_at,
+                d.updated_at
+            FROM devices d
+            WHERE d.mac_address = %s
+        """
+        device = await db.fetchone(device_query, (mac_address,))
 
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
 
-    # Get recording statistics
-    stats_query = """
-        SELECT
-            COUNT(*) as total_recordings,
-            COUNT(DISTINCT DATE(FROM_UNIXTIME(device_time/1000))) as recording_days,
-            MIN(device_time) as first_recording,
-            MAX(device_time) as last_recording
-        FROM recordings
-        WHERE mac_address = %s
-    """
-    stats = await db.fetchone(stats_query, (mac_address,))
+        # Get recording statistics
+        stats_query = """
+            SELECT
+                COUNT(*) as total_recordings,
+                COUNT(DISTINCT DATE(FROM_UNIXTIME(device_time/1000))) as recording_days,
+                MIN(device_time) as first_recording,
+                MAX(device_time) as last_recording
+            FROM recordings
+            WHERE mac_address = %s
+        """
+        stats = await db.fetchone(stats_query, (mac_address,))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Database error while fetching device {mac_address}: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable")
 
     return {
         "code": 200,
@@ -85,7 +102,9 @@ async def get_device(mac_address: str, db: Database = Depends(get_db)):
 
 
 @router.get("/{mac_address}/recent")
+@limiter.limit("60/minute")
 async def get_recent_recordings(
+    request: Request,
     mac_address: str,
     limit: int = 20,
     db: Database = Depends(get_db)
@@ -94,11 +113,14 @@ async def get_recent_recordings(
 
     Args:
         mac_address: Device MAC address
-        limit: Maximum number of records to return
+        limit: Maximum number of records to return (max 100)
 
     Returns:
         List of recent recording transcripts
     """
+    # Enforce maximum limit to prevent resource exhaustion
+    limit = min(max(1, limit), 100)
+
     query = """
         SELECT
             id,
@@ -111,7 +133,11 @@ async def get_recent_recordings(
         ORDER BY device_time DESC
         LIMIT %s
     """
-    recordings = await db.fetchall(query, (mac_address, limit))
+    try:
+        recordings = await db.fetchall(query, (mac_address, limit))
+    except Exception as e:
+        logger.error(f"Database error while fetching recordings for {mac_address}: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable")
 
     return {
         "code": 200,

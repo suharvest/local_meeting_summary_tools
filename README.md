@@ -1,54 +1,54 @@
 # Local Meeting Summary Tools
 
-本地会议转录与摘要工具 - 实时会议录音、AI 驱动会议纪要生成。
+Local meeting transcription and summarization tool - Real-time meeting recording with AI-powered meeting minutes generation.
 
-## 功能特点
+## Features
 
-- 实时音频采集与转录
-- AI 自动生成会议摘要、要点和行动项
-- 多 LLM 支持（Ollama / Gemini / 通义千问）
-- 中英文双语界面
+- Real-time audio capture and transcription
+- AI-powered automatic generation of meeting summaries, key points, and action items
+- Multiple LLM support (Ollama / Gemini / Qwen)
+- Bilingual interface (Chinese / English)
 
-## 快速开始
+## Quick Start
 
-### 1. 安装系统依赖（Raspberry Pi OS）
+### 1. Install System Dependencies (Raspberry Pi OS)
 
 ```bash
-# 安装 Node.js
+# Install Node.js
 sudo apt update
 sudo apt install -y nodejs npm
 
-# 安装 uv
+# Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source ~/.local/bin/env
+source ~/.bashrc  # Reload environment variables, or reopen terminal
 ```
 
-### 2. 安装项目依赖
+### 2. Install Project Dependencies
 
 ```bash
 uv sync
 ```
 
-### 3. 配置
+### 3. Configuration
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-编辑 `config.yaml`，填写数据库连接和 LLM API 密钥。
+Edit `config.yaml` to configure database connection and LLM API keys.
 
-### 4. 启动
+### 4. Start the Application
 
 ```bash
 ./dev.sh
 ```
 
-访问 http://localhost:5173
+Visit http://localhost:5173
 
-## API 文档
+## API Documentation
 
-启动后访问 http://localhost:5173/docs
+After starting, visit http://localhost:5173/docs
 
-## 许可证
+## License
 
 MIT License
