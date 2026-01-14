@@ -1,4 +1,5 @@
 """Google Gemini LLM Provider implementation."""
+import asyncio
 import logging
 import google.generativeai as genai
 from typing import AsyncGenerator, Optional
@@ -7,6 +8,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from .base import BaseLLMProvider, LLMResponse
 
 logger = logging.getLogger(__name__)
+
+# Timeout for Gemini API calls (seconds)
+API_TIMEOUT = 60
 
 
 class GeminiProvider(BaseLLMProvider):
@@ -70,18 +74,22 @@ class GeminiProvider(BaseLLMProvider):
         full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
 
         try:
-            response = await self.model.generate_content_async(
-                full_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=temperature,
-                    max_output_tokens=max_tokens
-                ),
-                stream=True
-            )
+            async with asyncio.timeout(API_TIMEOUT):
+                response = await self.model.generate_content_async(
+                    full_prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_tokens
+                    ),
+                    stream=True
+                )
 
-            async for chunk in response:
-                if chunk.text:
-                    yield chunk.text
+                async for chunk in response:
+                    if chunk.text:
+                        yield chunk.text
+        except asyncio.TimeoutError:
+            logger.error(f"Gemini API timeout after {API_TIMEOUT}s - check network connectivity")
+            raise RuntimeError(f"Gemini API timeout - cannot connect to Google services")
         except Exception as e:
             logger.error(f"Gemini streaming error: {e}")
             raise
